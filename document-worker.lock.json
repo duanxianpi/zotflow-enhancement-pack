@@ -2,8 +2,8 @@
 	"schemaVersion": 1,
 	"source": {
 		"repository": "duanxianpi/zotflow",
-		"zotflowCommit": "bootstrap-previous-document-worker",
-		"lockSha256": "aa6ff8456a92af2d613800c5afc2b5735fdf23d12a6eb7fbc528c8066b766827",
+		"zotflowCommit": "41386df394c1d69fbb7a1de00fc2904dbe0eceb5",
+		"lockSha256": "ca79033c960afae200e9fc1d68904ca400432b744202816cc4f5a6ddc79c36a1",
 		"include": [
 			"metadata.json",
 			"structured-document-text.js",
@@ -12,12 +12,12 @@
 		]
 	},
 	"packApiVersion": 1,
-	"packVersion": "1.0.0",
+	"packVersion": "1.1.0",
 	"documentWorker": {
-		"commit": "93edee9590120d7fc2ab504c1b8f6b4e35852314",
-		"archiveUrl": "https://zotero-download.s3.amazonaws.com/ci/document-worker/93edee9590120d7fc2ab504c1b8f6b4e35852314.zip",
-		"archiveSize": 14918367,
-		"archiveSha256": "2f9c53cbf6a5fc321730afe0ab30a983af4ef1181e9b35007eae921d592eb80b"
+		"commit": "6d0c0ce45d96a4ed5b697927306b1e9207a02041",
+		"archiveUrl": "https://zotero-download.s3.amazonaws.com/ci/document-worker/6d0c0ce45d96a4ed5b697927306b1e9207a02041.zip",
+		"archiveSize": 14918942,
+		"archiveSha256": "1cdfc2f2a3cbb75b7df9f7c02fdb42b06a43c5df3c3b644d694820c5159ee56d"
 	},
 	"resources": [
 		{
@@ -48,7 +48,7 @@
 		{
 			"path": "metadata.json",
 			"size": 143,
-			"sha256": "d0ecb9b16f404a0a6f9eda9effe01cb78855de8545c5c7cecbdb888cc787c042"
+			"sha256": "6909fdcfe5e6b8d699c5cec92f6e97a272e628cf189b10225061d6619b754dfe"
 		},
 		{
 			"path": "onnx/ort-wasm-simd-threaded.wasm",
@@ -58,7 +58,7 @@
 		{
 			"path": "structured-document-text.js",
 			"size": 23496,
-			"sha256": "a0b5c139324b1c9a338c39e2e1693d2812813913a05ea58ede34dea585f2a574"
+			"sha256": "340f44fea8d616eaac04b83ef6329eaad2753916b1d50342a8edc7a0b717bed4"
 		}
 	]
 }
