@@ -1,0 +1,123 @@
+name: Sync Document Worker
+
+on:
+    repository_dispatch:
+        types:
+            - document-worker-updated
+    workflow_dispatch:
+        inputs:
+            zotflow_ref:
+                description: ZotFlow branch, tag, or commit containing the lock
+                required: true
+                default: master
+
+permissions:
+    contents: write
+    pull-requests: write
+
+concurrency:
+    group: sync-document-worker
+    cancel-in-progress: true
+
+jobs:
+    sync:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v6
+
+            - name: Use Node.js
+              uses: actions/setup-node@v6
+              with:
+                  node-version: 24
+                  cache: npm
+
+            - name: Install dependencies
+              run: npm ci
+
+            - name: Resolve ZotFlow lock reference
+              id: source
+              env:
+                  DISPATCH_REF: ${{ github.event.client_payload.zotflowCommit }}
+                  MANUAL_REF: ${{ inputs.zotflow_ref }}
+                  EXPECTED_SHA256: ${{ github.event.client_payload.lockSha256 }}
+              run: |
+                  ref="${DISPATCH_REF:-$MANUAL_REF}"
+                  if [ -z "$ref" ]; then
+                    echo "Missing ZotFlow ref" >&2
+                    exit 1
+                  fi
+                  echo "ref=$ref" >> "$GITHUB_OUTPUT"
+                  echo "expected_sha256=$EXPECTED_SHA256" >> "$GITHUB_OUTPUT"
+
+            - name: Download and verify ZotFlow lock
+              id: lock
+              env:
+                  ZOTFLOW_REF: ${{ steps.source.outputs.ref }}
+                  EXPECTED_SHA256: ${{ steps.source.outputs.expected_sha256 }}
+              run: |
+                  lock_path="$RUNNER_TEMP/zotflow-document-worker.lock.json"
+                  curl --fail --location --silent --show-error \
+                    "https://raw.githubusercontent.com/duanxianpi/zotflow/$ZOTFLOW_REF/document-worker.lock.json" \
+                    --output "$lock_path"
+                  actual_sha256="$(sha256sum "$lock_path" | cut -d ' ' -f 1)"
+                  if [ -n "$EXPECTED_SHA256" ] && [ "$actual_sha256" != "$EXPECTED_SHA256" ]; then
+                    echo "ZotFlow lock SHA-256 mismatch" >&2
+                    exit 1
+                  fi
+                  echo "path=$lock_path" >> "$GITHUB_OUTPUT"
+                  echo "sha256=$actual_sha256" >> "$GITHUB_OUTPUT"
+
+            - name: Synchronize resources and version
+              id: sync
+              env:
+                  ZOTFLOW_REF: ${{ steps.source.outputs.ref }}
+                  ZOTFLOW_LOCK: ${{ steps.lock.outputs.path }}
+              run: |
+                  node scripts/document-worker-resources.mjs sync \
+                    --zotflow-lock "$ZOTFLOW_LOCK" \
+                    --zotflow-commit "$ZOTFLOW_REF" \
+                    --bump minor
+                  npm install --package-lock-only --ignore-scripts
+                  if git diff --quiet; then
+                    echo "changed=false" >> "$GITHUB_OUTPUT"
+                  else
+                    echo "changed=true" >> "$GITHUB_OUTPUT"
+                  fi
+
+            - name: Cache downloaded archive
+              if: steps.sync.outputs.changed == 'true'
+              uses: actions/cache@v4
+              with:
+                  path: .cache/document-worker/*.zip
+                  key: document-worker-${{ hashFiles('document-worker.lock.json') }}
+
+            - name: Verify build and lint
+              if: steps.sync.outputs.changed == 'true'
+              run: |
+                  npm run build
+                  npm run lint
+
+            - name: Open or update pull request
+              if: steps.sync.outputs.changed == 'true'
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  ZOTFLOW_REF: ${{ steps.source.outputs.ref }}
+              run: |
+                  worker_commit="$(node -p "require('./document-worker.lock.json').documentWorker.commit")"
+                  version="$(node -p "require('./manifest.json').version")"
+                  branch="automation/document-worker-${worker_commit:0:12}"
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                  git checkout -B "$branch"
+                  git add document-worker.lock.json package.json package-lock.json manifest.json versions.json
+                  git commit -m "Update Document Worker resources to ${worker_commit:0:12}"
+                  git push --force origin "HEAD:$branch"
+
+                  existing="$(gh pr list --head "$branch" --json number --jq '.[0].number // empty')"
+                  if [ -z "$existing" ]; then
+                    gh pr create \
+                      --base master \
+                      --head "$branch" \
+                      --title "Update Document Worker resources to ${worker_commit:0:12}" \
+                      --body "Automated synchronization from ZotFlow commit \`$ZOTFLOW_REF\`.\n\nDocument Worker: \`$worker_commit\`\nPack version: \`$version\`"
+                  fi

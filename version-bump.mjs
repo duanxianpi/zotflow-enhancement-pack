@@ -15,3 +15,14 @@ if (!(targetVersion in versions)) {
 	versions[targetVersion] = minAppVersion;
 	writeFileSync('versions.json', JSON.stringify(versions, null, '\t'));
 }
+
+// Pack code releases keep the current Document Worker compatibility target.
+// Only the Pack version changes here; the sync pipeline owns worker commits.
+const documentWorkerLock = JSON.parse(
+	readFileSync('document-worker.lock.json', 'utf8'),
+);
+documentWorkerLock.packVersion = targetVersion;
+writeFileSync(
+	'document-worker.lock.json',
+	`${JSON.stringify(documentWorkerLock, null, '\t')}\n`,
+);

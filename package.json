@@ -1,13 +1,16 @@
 {
-	"name": "obsidian-sample-plugin",
+	"name": "zotflow-enhancement-pack",
 	"version": "1.0.0",
-	"description": "This is a sample plugin for Obsidian (https://obsidian.md)",
+	"description": "Optional offline resources for ZotFlow reading features",
 	"main": "main.js",
 	"type": "module",
 	"scripts": {
+		"predev": "node scripts/document-worker-resources.mjs fetch",
 		"dev": "node esbuild.config.mjs",
+		"prebuild": "node scripts/document-worker-resources.mjs fetch",
 		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-		"version": "node version-bump.mjs && git add manifest.json versions.json",
+		"sync:document-worker": "node scripts/document-worker-resources.mjs sync",
+		"version": "node version-bump.mjs && git add manifest.json versions.json document-worker.lock.json",
 		"lint": "eslint ."
 	},
 	"keywords": [],
@@ -19,6 +22,7 @@
 		"eslint": "^9.39.4",
 		"eslint-plugin-obsidianmd": "^0.4.0",
 		"globals": "^17.6.0",
+		"jszip": "^3.10.1",
 		"jiti": "^2.6.1",
 		"obsidian": "latest",
 		"typescript": "^5.8.3",
