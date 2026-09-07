@@ -37,35 +37,30 @@ jobs:
             - name: Resolve ZotFlow lock reference
               id: source
               env:
+                  GH_TOKEN: ${{ github.token }}
                   DISPATCH_REF: ${{ github.event.client_payload.zotflowCommit }}
                   MANUAL_REF: ${{ inputs.zotflow_ref }}
-                  EXPECTED_SHA256: ${{ github.event.client_payload.lockSha256 }}
               run: |
                   ref="${DISPATCH_REF:-$MANUAL_REF}"
                   if [ -z "$ref" ]; then
                     echo "Missing ZotFlow ref" >&2
                     exit 1
                   fi
+                  if ! [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+                    ref="$(gh api "repos/duanxianpi/zotflow/commits/$ref" --jq .sha)"
+                  fi
                   echo "ref=$ref" >> "$GITHUB_OUTPUT"
-                  echo "expected_sha256=$EXPECTED_SHA256" >> "$GITHUB_OUTPUT"
 
-            - name: Download and verify ZotFlow lock
+            - name: Download ZotFlow lock from pinned commit
               id: lock
               env:
                   ZOTFLOW_REF: ${{ steps.source.outputs.ref }}
-                  EXPECTED_SHA256: ${{ steps.source.outputs.expected_sha256 }}
               run: |
                   lock_path="$RUNNER_TEMP/zotflow-document-worker.lock.json"
                   curl --fail --location --silent --show-error \
                     "https://raw.githubusercontent.com/duanxianpi/zotflow/$ZOTFLOW_REF/document-worker.lock.json" \
                     --output "$lock_path"
-                  actual_sha256="$(sha256sum "$lock_path" | cut -d ' ' -f 1)"
-                  if [ -n "$EXPECTED_SHA256" ] && [ "$actual_sha256" != "$EXPECTED_SHA256" ]; then
-                    echo "ZotFlow lock SHA-256 mismatch" >&2
-                    exit 1
-                  fi
                   echo "path=$lock_path" >> "$GITHUB_OUTPUT"
-                  echo "sha256=$actual_sha256" >> "$GITHUB_OUTPUT"
 
             - name: Synchronize resources and version
               id: sync
@@ -78,6 +73,7 @@ jobs:
                     --zotflow-commit "$ZOTFLOW_REF" \
                     --bump minor
                   npm install --package-lock-only --ignore-scripts
+                  echo "archive_sha256=$(node -p "require('./document-worker.lock.json').documentWorker.archiveSha256")" >> "$GITHUB_OUTPUT"
                   if git diff --quiet; then
                     echo "changed=false" >> "$GITHUB_OUTPUT"
                   else
@@ -89,7 +85,7 @@ jobs:
               uses: actions/cache@v4
               with:
                   path: .cache/document-worker/*.zip
-                  key: document-worker-${{ hashFiles('document-worker.lock.json') }}
+                  key: document-worker-${{ steps.sync.outputs.archive_sha256 }}
 
             - name: Verify build and lint
               if: steps.sync.outputs.changed == 'true'

@@ -1,28 +1,11 @@
-import { Plugin } from 'obsidian';
-import {
-	ENHANCEMENT_PACK_REGISTRY_KEY,
-	createEnhancementPackApi,
-	type ZotFlowEnhancementPackApi,
-} from './pack-api';
+import { Notice, Plugin } from 'obsidian';
 
-type EnhancementPackWindow = typeof window & {
-	[ENHANCEMENT_PACK_REGISTRY_KEY]?: ZotFlowEnhancementPackApi;
-};
-
+/** Distribution shell only. ZotFlow reads the offline trailer without enabling us. */
 export default class ZotFlowEnhancementPackPlugin extends Plugin {
-	private api: ZotFlowEnhancementPackApi | undefined;
-
 	onload() {
-		const registry = window as EnhancementPackWindow;
-		this.api = createEnhancementPackApi();
-		registry[ENHANCEMENT_PACK_REGISTRY_KEY] = this.api;
-	}
-
-	onunload() {
-		const registry = window as EnhancementPackWindow;
-		if (registry[ENHANCEMENT_PACK_REGISTRY_KEY] === this.api) {
-			delete registry[ENHANCEMENT_PACK_REGISTRY_KEY];
-		}
-		this.api = undefined;
+		new Notice(
+			'ZotFlow Enhancement Pack: Only installation is required. You can keep this enhancement pack disabled.',
+			0,
+		);
 	}
 }

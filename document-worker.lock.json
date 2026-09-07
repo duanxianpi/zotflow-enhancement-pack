@@ -2,8 +2,7 @@
 	"schemaVersion": 1,
 	"source": {
 		"repository": "duanxianpi/zotflow",
-		"zotflowCommit": "41386df394c1d69fbb7a1de00fc2904dbe0eceb5",
-		"lockSha256": "ca79033c960afae200e9fc1d68904ca400432b744202816cc4f5a6ddc79c36a1",
+		"zotflowCommit": "730b2bb6b912fd27681f65254d53c02b688afea4",
 		"include": [
 			"metadata.json",
 			"structured-document-text.js",
@@ -11,8 +10,15 @@
 			"onnx/"
 		]
 	},
-	"packApiVersion": 1,
-	"packVersion": "1.1.0",
+	"protocol": {
+		"major": 2,
+		"minor": 0
+	},
+	"sdt": {
+		"packVersion": 1,
+		"schemaMajorVersion": 1
+	},
+	"packVersion": "2.0.0",
 	"documentWorker": {
 		"commit": "6d0c0ce45d96a4ed5b697927306b1e9207a02041",
 		"archiveUrl": "https://zotero-download.s3.amazonaws.com/ci/document-worker/6d0c0ce45d96a4ed5b697927306b1e9207a02041.zip",

@@ -1,15 +1,9 @@
 import { createHash } from 'node:crypto';
-import {
-	access,
-	mkdir,
-	readFile,
-	rename,
-	rm,
-	writeFile,
-} from 'node:fs/promises';
+import { stat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import JSZip from 'jszip';
+import { protocol } from './pack-container.mjs';
 
 const PACK_LOCK_PATH = path.resolve('document-worker.lock.json');
 const CACHE_ROOT = path.resolve('.cache', 'document-worker');
@@ -25,7 +19,11 @@ function parseOptions(args) {
 	for (let index = 0; index < args.length; index += 2) {
 		const name = args[index];
 		const value = args[index + 1];
-		if (!name?.startsWith('--') || value === undefined) {
+		if (
+			!['--zotflow-lock', '--zotflow-commit', '--bump'].includes(name) ||
+			value === undefined ||
+			options.has(name.slice(2))
+		) {
 			throw new Error(`Invalid argument: ${name ?? ''}`);
 		}
 		options.set(name.slice(2), value);
@@ -64,6 +62,12 @@ function validateSourceLock(lock) {
 	if (!Number.isSafeInteger(worker.archiveSize) || worker.archiveSize <= 0) {
 		throw new Error('ZotFlow lock contains an invalid archive size');
 	}
+	if (
+		JSON.stringify(lock.enhancementPack?.protocol) !==
+		JSON.stringify(protocol)
+	) {
+		throw new Error('Unsupported resource protocol');
+	}
 	if (!Array.isArray(lock.enhancementPack?.include)) {
 		throw new Error(
 			'ZotFlow lock does not declare Enhancement Pack resources',
@@ -74,6 +78,7 @@ function validateSourceLock(lock) {
 function validatePackLock(lock) {
 	if (
 		lock.schemaVersion !== 1 ||
+		JSON.stringify(lock.protocol) !== JSON.stringify(protocol) ||
 		!COMMIT_PATTERN.test(lock.documentWorker?.commit)
 	) {
 		throw new Error('Invalid Enhancement Pack Document Worker lock');
@@ -195,37 +200,29 @@ async function sync(options) {
 	const sourceBytes = await readInput(sourceInput);
 	const sourceLock = JSON.parse(sourceBytes.toString('utf8'));
 	validateSourceLock(sourceLock);
-	const sourceLockSha256 = sha256(sourceBytes);
 
-	let currentLock;
-	try {
-		currentLock = JSON.parse(await readFile(PACK_LOCK_PATH, 'utf8'));
-	} catch {
-		currentLock = undefined;
-	}
-	if (
-		currentLock !== undefined &&
-		currentLock.packApiVersion !== sourceLock.enhancementPack.apiVersion
-	) {
-		throw new Error(
-			`Enhancement Pack API migration required: Pack uses v${currentLock.packApiVersion}, ZotFlow requires v${sourceLock.enhancementPack.apiVersion}. Update the Pack interface and perform a manual major release.`,
-		);
-	}
+	const currentLock = JSON.parse(await readFile(PACK_LOCK_PATH, 'utf8'));
+	validatePackLock(currentLock);
 	const alreadyCurrent =
-		currentLock?.documentWorker?.commit ===
+		JSON.stringify(currentLock.protocol) === JSON.stringify(protocol) &&
+		JSON.stringify(currentLock.sdt) ===
+			JSON.stringify(sourceLock.enhancementPack.sdt) &&
+		JSON.stringify(currentLock.resources) ===
+			JSON.stringify(sourceLock.enhancementPack.resources) &&
+		currentLock.documentWorker?.commit ===
 			sourceLock.documentWorker.commit &&
-		currentLock?.documentWorker?.archiveSha256 ===
+		currentLock.documentWorker?.archiveSha256 ===
 			sourceLock.documentWorker.archiveSha256 &&
-		currentLock?.documentWorker?.archiveSize ===
+		currentLock.documentWorker?.archiveSize ===
 			sourceLock.documentWorker.archiveSize &&
-		JSON.stringify(currentLock?.source?.include) ===
+		JSON.stringify(currentLock.source?.include) ===
 			JSON.stringify(sourceLock.enhancementPack.include);
 	if (alreadyCurrent) {
 		console.log('Enhancement Pack already matches the ZotFlow lock');
 		return;
 	}
 
-	const archive = await downloadArchive(sourceLock.documentWorker);
+	const archive = await readCachedArchive(sourceLock.documentWorker);
 	const zip = await JSZip.loadAsync(archive);
 	const selected = selectResources(zip, sourceLock.enhancementPack.include);
 	const resources = [];
@@ -238,6 +235,28 @@ async function sync(options) {
 		});
 	}
 
+	const expected = new Map(
+		sourceLock.enhancementPack.resources.map((r) => [r.path, r]),
+	);
+	if (
+		resources.length !== expected.size ||
+		resources.some((r) => {
+			const pinned = expected.get(r.path);
+			return (
+				!pinned || pinned.size !== r.size || pinned.sha256 !== r.sha256
+			);
+		})
+	)
+		throw new Error('ZotFlow resource metadata mismatch');
+	const metadata = JSON.parse(
+		await zip.file('metadata.json').async('string'),
+	);
+	const sdt = {
+		packVersion: metadata.SDT_PACK_VERSION,
+		schemaMajorVersion: Number(metadata.SDT_SCHEMA_VERSION.split('.')[0]),
+	};
+	if (JSON.stringify(sdt) !== JSON.stringify(sourceLock.enhancementPack.sdt))
+		throw new Error('SDT metadata mismatch');
 	const packageJson = JSON.parse(await readFile('package.json', 'utf8'));
 	const nextVersion =
 		bump === 'minor' ? bumpMinor(packageJson.version) : packageJson.version;
@@ -246,10 +265,10 @@ async function sync(options) {
 		source: {
 			repository: 'duanxianpi/zotflow',
 			zotflowCommit,
-			lockSha256: sourceLockSha256,
 			include: sourceLock.enhancementPack.include,
 		},
-		packApiVersion: sourceLock.enhancementPack.apiVersion,
+		protocol,
+		sdt,
 		packVersion: nextVersion,
 		documentWorker: sourceLock.documentWorker,
 		resources,
@@ -287,17 +306,11 @@ async function readCachedArchive(worker) {
 	return archive;
 }
 
-async function hasValidExtractedResources(directory, resources) {
+async function hasExtractedResources(directory, resources) {
 	try {
-		await access(directory);
 		for (const resource of resources) {
-			const contents = await readFile(
-				path.join(directory, resource.path),
-			);
-			if (
-				contents.byteLength !== resource.size ||
-				sha256(contents) !== resource.sha256
-			) {
+			const info = await stat(path.join(directory, resource.path));
+			if (!info.isFile() || info.size !== resource.size) {
 				return false;
 			}
 		}
@@ -315,9 +328,9 @@ async function fetchResources() {
 		lock.documentWorker.commit,
 		'resources',
 	);
-	if (await hasValidExtractedResources(targetDirectory, lock.resources)) {
+	if (await hasExtractedResources(targetDirectory, lock.resources)) {
 		console.log(
-			'Document Worker resources are already cached and verified',
+			'Document Worker resources are cached; final build verifies contents',
 		);
 		return;
 	}
@@ -345,10 +358,7 @@ async function fetchResources() {
 				);
 			}
 			const contents = Buffer.from(await entry.async('uint8array'));
-			if (
-				contents.byteLength !== resource.size ||
-				sha256(contents) !== resource.sha256
-			) {
+			if (contents.byteLength !== resource.size) {
 				throw new Error(
 					`Resource verification failed: ${resource.path}`,
 				);
@@ -366,7 +376,9 @@ async function fetchResources() {
 		throw error;
 	}
 
-	console.log(`Cached and verified ${lock.resources.length} resources`);
+	console.log(
+		`Cached ${lock.resources.length} resources; final build verifies contents`,
+	);
 }
 
 const [command, ...args] = process.argv.slice(2);
