@@ -106,7 +106,7 @@ jobs:
                   git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
                   git checkout -B "$branch"
                   git add document-worker.lock.json package.json package-lock.json manifest.json versions.json
-                  git commit -m "Update Document Worker resources to ${worker_commit:0:12}"
+                  git commit -m "chore(pack): update Document Worker resources to ${worker_commit:0:12}"
                   git push --force origin "HEAD:$branch"
 
                   existing="$(gh pr list --head "$branch" --json number --jq '.[0].number // empty')"

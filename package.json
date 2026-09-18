@@ -11,11 +11,15 @@
 		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
 		"build:startup-probes": "node scripts/startup-probes.mjs",
 		"sync:document-worker": "node scripts/document-worker-resources.mjs sync",
+		"release:beta:prepare": "node scripts/release-version.mjs prepare",
+		"release:beta:verify": "node scripts/release-version.mjs verify",
 		"version": "node version-bump.mjs && git add manifest.json versions.json document-worker.lock.json",
 		"lint": "eslint .",
 		"verify:pack": "node scripts/verify-pack.mjs",
 		"postbuild": "npm run verify:pack && npm run test:protocol",
-		"test:protocol": "node --test scripts/pack-container.test.mjs"
+		"test:protocol": "node --test scripts/pack-container.test.mjs",
+		"test:release-tools": "node --test scripts/release-tools.test.mjs",
+		"test": "npm run lint && npm run test:protocol && npm run test:release-tools"
 	},
 	"keywords": [],
 	"license": "0-BSD",

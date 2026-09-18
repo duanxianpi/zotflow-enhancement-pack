@@ -1,0 +1,242 @@
+name: Beta Release
+
+on:
+    repository_dispatch:
+        types:
+            - document-worker-beta-requested
+    workflow_dispatch:
+        inputs:
+            zotflow_ref:
+                description: ZotFlow commit, branch, or tag containing the lock
+                required: true
+                default: staging
+            zotflow_version:
+                description: ZotFlow beta version requesting the Pack
+                required: true
+
+permissions:
+    contents: write
+    pull-requests: write
+
+concurrency:
+    group: enhancement-pack-beta
+    cancel-in-progress: false
+
+jobs:
+    beta:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+
+            - name: Use Node.js
+              uses: actions/setup-node@v6
+              with:
+                  node-version: 24
+                  cache: npm
+
+            - name: Install dependencies
+              run: npm ci
+
+            - name: Resolve ZotFlow source
+              id: source
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  DISPATCH_REF: ${{ github.event.client_payload.zotflowCommit }}
+                  DISPATCH_VERSION: ${{ github.event.client_payload.zotflowVersion }}
+                  MANUAL_REF: ${{ inputs.zotflow_ref }}
+                  MANUAL_VERSION: ${{ inputs.zotflow_version }}
+              run: |
+                  ref="${DISPATCH_REF:-$MANUAL_REF}"
+                  version="${DISPATCH_VERSION:-$MANUAL_VERSION}"
+                  if [ -z "$ref" ] || [ -z "$version" ]; then
+                    echo "Missing ZotFlow ref or beta version" >&2
+                    exit 1
+                  fi
+                  if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]; then
+                    echo "ZotFlow beta version must use x.y.z-beta.N" >&2
+                    exit 1
+                  fi
+                  if ! [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+                    ref="$(gh api "repos/duanxianpi/zotflow/commits/$ref" --jq .sha)"
+                  fi
+                  echo "ref=$ref" >> "$GITHUB_OUTPUT"
+                  echo "version=$version" >> "$GITHUB_OUTPUT"
+
+            - name: Download and fingerprint ZotFlow lock
+              id: contract
+              env:
+                  ZOTFLOW_REF: ${{ steps.source.outputs.ref }}
+              run: |
+                  lock_path="$RUNNER_TEMP/zotflow-document-worker.lock.json"
+                  curl --fail --location --silent --show-error \
+                    "https://raw.githubusercontent.com/duanxianpi/zotflow/$ZOTFLOW_REF/document-worker.lock.json" \
+                    --output "$lock_path"
+                  fingerprint="$(node scripts/contract-fingerprint.mjs "$lock_path")"
+                  worker_commit="$(node -p "require(process.argv[1]).documentWorker.commit" "$lock_path")"
+                  echo "path=$lock_path" >> "$GITHUB_OUTPUT"
+                  echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+                  echo "worker_commit=$worker_commit" >> "$GITHUB_OUTPUT"
+
+            - name: Reuse an existing Pack beta
+              id: existing
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  FINGERPRINT: ${{ steps.contract.outputs.fingerprint }}
+              run: |
+                  branch="automation/beta-$FINGERPRINT"
+                  echo "branch=$branch" >> "$GITHUB_OUTPUT"
+                  echo "skip=false" >> "$GITHUB_OUTPUT"
+                  echo "resume=false" >> "$GITHUB_OUTPUT"
+                  if ! git ls-remote --exit-code --heads origin "refs/heads/$branch" >/dev/null 2>&1; then
+                    exit 0
+                  fi
+
+                  git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch"
+                  git checkout -B "$branch" "refs/remotes/origin/$branch"
+                  version="$(node -p "require('./package.json').version")"
+                  node scripts/release-version.mjs verify --version "$version"
+                  echo "version=$version" >> "$GITHUB_OUTPUT"
+                  if gh release view "$version" >/dev/null 2>&1; then
+                    echo "skip=true" >> "$GITHUB_OUTPUT"
+                  else
+                    echo "resume=true" >> "$GITHUB_OUTPUT"
+                  fi
+
+            - name: Synchronize incompatible resources
+              if: steps.existing.outputs.skip != 'true' && steps.existing.outputs.resume != 'true'
+              id: sync
+              env:
+                  ZOTFLOW_REF: ${{ steps.source.outputs.ref }}
+                  ZOTFLOW_LOCK: ${{ steps.contract.outputs.path }}
+              run: |
+                  node scripts/document-worker-resources.mjs sync \
+                    --zotflow-lock "$ZOTFLOW_LOCK" \
+                    --zotflow-commit "$ZOTFLOW_REF" \
+                    --bump minor
+                  npm install --package-lock-only --ignore-scripts
+                  if git diff --quiet; then
+                    echo "changed=false" >> "$GITHUB_OUTPUT"
+                  else
+                    echo "changed=true" >> "$GITHUB_OUTPUT"
+                  fi
+
+            - name: Verify stable Pack candidate
+              if: steps.sync.outputs.changed == 'true'
+              run: |
+                  npm run build
+                  npm run lint
+
+            - name: Open or update stable synchronization pull request
+              if: steps.sync.outputs.changed == 'true'
+              id: stable
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  ZOTFLOW_REF: ${{ steps.source.outputs.ref }}
+                  WORKER_COMMIT: ${{ steps.contract.outputs.worker_commit }}
+              run: |
+                  branch="automation/document-worker-${WORKER_COMMIT:0:12}"
+                  version="$(node -p "require('./manifest.json').version")"
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                  git checkout -B "$branch"
+                  git add document-worker.lock.json package.json package-lock.json manifest.json versions.json
+                  git commit -m "chore(pack): update Document Worker resources to ${WORKER_COMMIT:0:12}"
+                  git push --force origin "HEAD:$branch"
+
+                  existing="$(gh pr list --head "$branch" --json number --jq '.[0].number // empty')"
+                  if [ -z "$existing" ]; then
+                    body="$(printf '%s\n\n%s\n%s' \
+                      "Automated synchronization from ZotFlow commit \`$ZOTFLOW_REF\`." \
+                      "Document Worker: \`$WORKER_COMMIT\`" \
+                      "Pack version: \`$version\`")"
+                    gh pr create \
+                      --base master \
+                      --head "$branch" \
+                      --title "Update Document Worker resources to ${WORKER_COMMIT:0:12}" \
+                      --body "$body"
+                  fi
+                  echo "version=$version" >> "$GITHUB_OUTPUT"
+
+            - name: Prepare Pack beta branch
+              if: steps.sync.outputs.changed == 'true'
+              id: prepare
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  CANDIDATE_VERSION: ${{ steps.stable.outputs.version }}
+                  BETA_BRANCH: ${{ steps.existing.outputs.branch }}
+              run: |
+                  max=0
+                  while IFS= read -r tag; do
+                    if [[ "$tag" =~ ^${CANDIDATE_VERSION}-beta\.([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" -gt "$max" ]; then
+                      max="${BASH_REMATCH[1]}"
+                    fi
+                  done < <(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name')
+                  version="$CANDIDATE_VERSION-beta.$((max + 1))"
+                  node scripts/release-version.mjs prepare --version "$version"
+                  node scripts/release-version.mjs verify --version "$version"
+
+                  git checkout -B "$BETA_BRANCH"
+                  git add document-worker.lock.json package.json package-lock.json manifest.json versions.json
+                  git commit -m "chore(release): $version"
+                  echo "version=$version" >> "$GITHUB_OUTPUT"
+                  echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+            - name: Build Pack beta
+              if: steps.existing.outputs.skip != 'true' && (steps.sync.outputs.changed == 'true' || steps.existing.outputs.resume == 'true')
+              env:
+                  BETA_VERSION: ${{ steps.prepare.outputs.version || steps.existing.outputs.version }}
+              run: |
+                  node scripts/release-version.mjs verify --version "$BETA_VERSION"
+                  npm run build
+                  npm run lint
+                  sha256sum main.js manifest.json styles.css > SHA256SUMS.txt
+
+            - name: Publish Pack beta branch
+              if: steps.sync.outputs.changed == 'true'
+              env:
+                  BETA_BRANCH: ${{ steps.existing.outputs.branch }}
+              run: git push --force origin "HEAD:$BETA_BRANCH"
+
+            - name: Upload workflow artifact
+              if: steps.existing.outputs.skip != 'true' && (steps.sync.outputs.changed == 'true' || steps.existing.outputs.resume == 'true')
+              uses: actions/upload-artifact@v4
+              with:
+                  name: zotflow-enhancement-pack-${{ steps.prepare.outputs.version || steps.existing.outputs.version }}
+                  path: |
+                      main.js
+                      manifest.json
+                      styles.css
+                      SHA256SUMS.txt
+                  if-no-files-found: error
+                  compression-level: 0
+
+            - name: Create Pack beta release
+              if: steps.existing.outputs.skip != 'true' && (steps.sync.outputs.changed == 'true' || steps.existing.outputs.resume == 'true')
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  BETA_VERSION: ${{ steps.prepare.outputs.version || steps.existing.outputs.version }}
+                  BETA_SHA: ${{ steps.prepare.outputs.sha || github.sha }}
+                  CONTRACT_FINGERPRINT: ${{ steps.contract.outputs.fingerprint }}
+                  WORKER_COMMIT: ${{ steps.contract.outputs.worker_commit }}
+                  ZOTFLOW_REF: ${{ steps.source.outputs.ref }}
+                  ZOTFLOW_VERSION: ${{ steps.source.outputs.version }}
+              run: |
+                  if [ "${{ steps.existing.outputs.resume }}" = "true" ]; then
+                    BETA_SHA="$(git rev-parse HEAD)"
+                  fi
+                  notes="$(printf '%s\n\n%s\n%s' \
+                    "Compatible with ZotFlow $ZOTFLOW_VERSION at \`$ZOTFLOW_REF\`." \
+                    "Document Worker: \`$WORKER_COMMIT\`." \
+                    "Contract: \`$CONTRACT_FINGERPRINT\`.")"
+                  gh release create "$BETA_VERSION" \
+                    --target "$BETA_SHA" \
+                    --title "$BETA_VERSION" \
+                    --notes "$notes" \
+                    --prerelease \
+                    --latest=false \
+                    main.js \
+                    manifest.json \
+                    styles.css \
+                    SHA256SUMS.txt
