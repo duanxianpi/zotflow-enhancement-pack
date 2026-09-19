@@ -1,14 +1,9 @@
-name: Sync Stable From ZotFlow
+name: Sync Beta From ZotFlow
 
 on:
     repository_dispatch:
         types:
-            - document-worker-updated
-    workflow_dispatch:
-        inputs:
-            zotflow_ref:
-                description: Immutable ZotFlow stable commit containing the lock
-                required: true
+            - document-worker-beta-requested
 
 permissions:
     contents: write
@@ -35,20 +30,28 @@ jobs:
             - name: Install dependencies
               run: npm ci
 
-            - name: Resolve ZotFlow stable source
+            - name: Resolve ZotFlow beta source
               id: source
               env:
                   GH_TOKEN: ${{ github.token }}
-                  DISPATCH_REF: ${{ github.event.client_payload.zotflowCommit }}
-                  MANUAL_REF: ${{ inputs.zotflow_ref }}
+                  ZOTFLOW_REF: ${{ github.event.client_payload.zotflowCommit }}
+                  ZOTFLOW_VERSION: ${{ github.event.client_payload.zotflowVersion }}
               run: |
-                  ref="${DISPATCH_REF:-$MANUAL_REF}"
-                  if [ -z "$ref" ]; then
-                    echo "Missing ZotFlow stable commit" >&2
+                  if ! [[ "$ZOTFLOW_REF" =~ ^[0-9a-f]{40}$ ]]; then
+                    echo "ZotFlow beta dispatch must contain an immutable commit" >&2
                     exit 1
                   fi
-                  resolved="$(gh api "repos/duanxianpi/zotflow/commits/$ref" --jq .sha)"
-                  echo "ref=$resolved" >> "$GITHUB_OUTPUT"
+                  if ! [[ "$ZOTFLOW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]; then
+                    echo "ZotFlow beta version must use x.y.z-beta.N" >&2
+                    exit 1
+                  fi
+                  resolved="$(gh api "repos/duanxianpi/zotflow/commits/$ZOTFLOW_REF" --jq .sha)"
+                  if [ "$resolved" != "$ZOTFLOW_REF" ]; then
+                    echo "ZotFlow commit could not be resolved exactly" >&2
+                    exit 1
+                  fi
+                  echo "ref=$ZOTFLOW_REF" >> "$GITHUB_OUTPUT"
+                  echo "version=$ZOTFLOW_VERSION" >> "$GITHUB_OUTPUT"
 
             - name: Download and fingerprint ZotFlow lock
               id: contract
@@ -63,7 +66,7 @@ jobs:
                   echo "fingerprint=$(node scripts/contract-fingerprint.mjs "$lock_path")" >> "$GITHUB_OUTPUT"
                   echo "worker_commit=$(node -p "require(process.argv[1]).documentWorker.commit" "$lock_path")" >> "$GITHUB_OUTPUT"
 
-            - name: Find an existing stable candidate
+            - name: Find an existing compatible Pack
               id: compatible
               env:
                   GH_TOKEN: ${{ github.token }}
@@ -75,12 +78,12 @@ jobs:
                   git show origin/master:document-worker.lock.json > "$candidate"
                   if [ "$(node scripts/contract-fingerprint.mjs "$candidate")" = "$FINGERPRINT" ]; then
                     echo "action=skip" >> "$GITHUB_OUTPUT"
-                    echo "Published Pack source already satisfies this contract"
+                    echo "Stable Pack already satisfies this contract"
                     exit 0
                   fi
 
                   while IFS= read -r tag; do
-                    [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+                    [ -n "$tag" ] || continue
                     git show "${tag}:document-worker.lock.json" > "$candidate"
                     if [ "$(node scripts/contract-fingerprint.mjs "$candidate")" = "$FINGERPRINT" ]; then
                       if gh release view "$tag" >/dev/null 2>&1; then
@@ -91,12 +94,16 @@ jobs:
                       fi
                       exit 0
                     fi
-                  done < <(git tag --list --sort=-v:refname)
+                  done < <(git tag --list '*-beta.*' --sort=-v:refname)
 
-                  echo "action=prepare" >> "$GITHUB_OUTPUT"
+                  if [ "$(node scripts/contract-fingerprint.mjs document-worker.lock.json)" = "$FINGERPRINT" ]; then
+                    echo "action=tag" >> "$GITHUB_OUTPUT"
+                  else
+                    echo "action=sync" >> "$GITHUB_OUTPUT"
+                  fi
 
-            - name: Synchronize stable resources
-              if: steps.compatible.outputs.action == 'prepare'
+            - name: Synchronize incompatible resources
+              if: steps.compatible.outputs.action == 'sync'
               env:
                   ZOTFLOW_REF: ${{ steps.source.outputs.ref }}
                   ZOTFLOW_LOCK: ${{ steps.contract.outputs.path }}
@@ -105,34 +112,38 @@ jobs:
                     --zotflow-lock "$ZOTFLOW_LOCK" \
                     --zotflow-commit "$ZOTFLOW_REF" \
                     --bump none
-                  if ! git diff --quiet -- document-worker.lock.json; then
-                    npm run build
-                    npm run lint
-                    git config user.name "github-actions[bot]"
-                    git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-                    git add document-worker.lock.json
-                    git commit -m "chore(pack): update Document Worker resources to ${{ steps.contract.outputs.worker_commit }}"
-                    git push origin HEAD:dev
+                  if git diff --quiet -- document-worker.lock.json; then
+                    echo "Expected an incompatible Pack contract to change the lock" >&2
+                    exit 1
                   fi
+                  npm run build
+                  npm run lint
 
-            - name: Create stable patch commit and tag
-              if: steps.compatible.outputs.action == 'prepare'
-              id: tag
-              run: |
                   git config user.name "github-actions[bot]"
                   git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-                  npm version patch --tag-version-prefix="" --message "chore(release): %s"
-                  tag="$(node -p "require('./package.json').version")"
+                  git add document-worker.lock.json
+                  git commit -m "chore(pack): update Document Worker resources to ${{ steps.contract.outputs.worker_commit }}"
                   git push origin HEAD:dev
-                  git push origin "refs/tags/$tag"
+
+            - name: Create Pack beta tag
+              if: steps.compatible.outputs.action == 'sync' || steps.compatible.outputs.action == 'tag'
+              id: tag
+              run: |
+                  tag="$(node scripts/beta-tag.mjs patch)"
                   echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-            - name: Request stable Draft Release
+            - name: Request Pack beta release
               if: steps.compatible.outputs.action == 'release' || steps.tag.outputs.tag != ''
               env:
                   GH_TOKEN: ${{ github.token }}
                   RELEASE_TAG: ${{ steps.compatible.outputs.tag || steps.tag.outputs.tag }}
+                  ZOTFLOW_REF: ${{ steps.source.outputs.ref }}
+                  ZOTFLOW_VERSION: ${{ steps.source.outputs.version }}
+                  CONTRACT_FINGERPRINT: ${{ steps.contract.outputs.fingerprint }}
               run: |
                   gh api --method POST "repos/$GITHUB_REPOSITORY/dispatches" \
-                    -f event_type=pack-stable-tag-created \
-                    -F "client_payload[tag]=$RELEASE_TAG"
+                    -f event_type=pack-beta-tag-created \
+                    -F "client_payload[tag]=$RELEASE_TAG" \
+                    -F "client_payload[zotflowCommit]=$ZOTFLOW_REF" \
+                    -F "client_payload[zotflowVersion]=$ZOTFLOW_VERSION" \
+                    -F "client_payload[contractFingerprint]=$CONTRACT_FINGERPRINT"

@@ -2,78 +2,101 @@ name: Release Obsidian plugin
 
 on:
     push:
-        branches:
-            - master
-        paths:
-            - manifest.json
+        tags:
+            - '*'
+    repository_dispatch:
+        types:
+            - pack-stable-tag-created
+
+concurrency:
+    group: enhancement-pack-stable-release
+    cancel-in-progress: false
 
 jobs:
     build:
+        if: ${{ !contains(github.event.client_payload.tag || github.ref_name, '-') }}
         runs-on: ubuntu-latest
         permissions:
             contents: write
             id-token: write
             attestations: write
+        env:
+            RELEASE_TAG: ${{ github.event.client_payload.tag || github.ref_name }}
+
         steps:
             - uses: actions/checkout@v6
+              with:
+                  ref: ${{ github.event.client_payload.tag || github.ref_name }}
+                  fetch-depth: 0
 
             - name: Use Node.js
               uses: actions/setup-node@v6
               with:
                   node-version: 24
-                  cache: 'npm'
+                  cache: npm
 
             - name: Resolve and verify release version
-              id: version
-              env:
-                  GH_TOKEN: ${{ github.token }}
               run: |
+                  if ! [[ "$RELEASE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                    echo "Stable Pack tags must use x.y.z" >&2
+                    exit 1
+                  fi
+                  git fetch origin dev:refs/remotes/origin/dev
+                  if ! git merge-base --is-ancestor HEAD refs/remotes/origin/dev; then
+                    echo "Stable Pack tag must point to a commit contained in origin/dev" >&2
+                    exit 1
+                  fi
+
                   package_version="$(node -p "require('./package.json').version")"
                   manifest_version="$(node -p "require('./manifest.json').version")"
                   pack_version="$(node -p "require('./document-worker.lock.json').packVersion")"
                   versions_min_app="$(node -p "require('./versions.json')[process.argv[1]] || ''" "$manifest_version")"
-                  if [ "$package_version" != "$manifest_version" ] || \
-                     [ "$pack_version" != "$manifest_version" ] || \
+                  if [ "$RELEASE_TAG" != "$package_version" ] || \
+                     [ "$RELEASE_TAG" != "$manifest_version" ] || \
+                     [ "$RELEASE_TAG" != "$pack_version" ] || \
                      [ -z "$versions_min_app" ]; then
-                    echo "Package, manifest, Pack lock, and versions.json must agree" >&2
+                    echo "Tag, package, manifest, Pack lock, and versions.json must agree" >&2
                     exit 1
-                  fi
-                  echo "tag=$manifest_version" >> "$GITHUB_OUTPUT"
-                  if gh release view "$manifest_version" >/dev/null 2>&1; then
-                    echo "exists=true" >> "$GITHUB_OUTPUT"
-                  else
-                    echo "exists=false" >> "$GITHUB_OUTPUT"
                   fi
 
             - name: Build plugin
-              if: steps.version.outputs.exists == 'false'
               run: |
                   npm ci
                   npm run build
+                  npm run lint
 
-            - name: Check for optional styles
-              if: steps.version.outputs.exists == 'false'
-              id: styles
-              run: |
-                  [ -f styles.css ] && echo "exists=true" >> "$GITHUB_OUTPUT" || echo "exists=false" >> "$GITHUB_OUTPUT"
+            - name: Upload workflow artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: zotflow-enhancement-pack-${{ env.RELEASE_TAG }}
+                  path: |
+                      main.js
+                      manifest.json
+                      styles.css
+                  if-no-files-found: error
+                  compression-level: 0
 
             - name: Attest build provenance
-              if: steps.version.outputs.exists == 'false'
               uses: actions/attest@v4
               with:
                   subject-path: |
                       main.js
                       manifest.json
-                      ${{ steps.styles.outputs.exists == 'true' && 'styles.css' || '' }}
+                      styles.css
 
-            - name: Create release
-              if: steps.version.outputs.exists == 'false'
+            - name: Create draft release
               env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  RELEASE_TAG: ${{ steps.version.outputs.tag }}
+                  GH_TOKEN: ${{ github.token }}
               run: |
+                  if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+                    echo "Release $RELEASE_TAG already exists; keeping it for an idempotent rerun"
+                    exit 0
+                  fi
                   gh release create "$RELEASE_TAG" \
-                    --target "$GITHUB_SHA" \
-                    --title="$RELEASE_TAG" \
+                    --verify-tag \
+                    --title "$RELEASE_TAG" \
+                    --notes "Stable Enhancement Pack candidate built from \`$GITHUB_SHA\`." \
                     --draft \
-                    main.js manifest.json ${{ steps.styles.outputs.exists == 'true' && 'styles.css' || '' }}
+                    main.js \
+                    manifest.json \
+                    styles.css

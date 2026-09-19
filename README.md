@@ -31,15 +31,38 @@ npm run sync:document-worker -- \
 ```
 
 In CI, ZotFlow sends a `document-worker-updated` repository dispatch event.
-The Pack workflow downloads the lock from that exact ZotFlow commit, performs
-a minor version bump when the compatibility target changed, verifies a clean
-build, and opens a pull request.
+The Pack workflow downloads the lock from that exact ZotFlow commit, updates
+the Pack `dev` branch when necessary, creates the next stable patch commit and
+tag, verifies a clean build, and creates a Draft Release. Publish that release
+before merging the exact stable tag into Pack `master`.
 
-Document Worker/resource changes are eligible for the automatic minor bump.
+Document Worker/resource changes are eligible for the automatic patch bump.
 Only the current offline protocol is accepted. Unsupported
 contracts stop the workflow. `sync` compares resource paths, sizes and existing
 content digests, plus SDT output versions, against the source lock. Manual workflow
 refs are resolved to an immutable ZotFlow commit before downloading the lock.
+
+### Beta releases
+
+`dev` is the only long-lived development branch. `master` contains only
+published stable Pack versions. To preview or publish a manual Pack beta from a
+clean, synchronized `dev` branch:
+
+```bash
+npm run beta:next -- patch
+npm run beta -- patch
+```
+
+The publish command calculates the next `x.y.z-beta.N`, creates an annotated
+tag, and pushes only the tag. The beta workflow writes prerelease versions only
+inside its runner and publishes a non-draft prerelease.
+
+ZotFlow beta releases also dispatch their exact compatibility contract to this
+repository. If Pack `master` or an existing Pack beta is compatible, the request
+is a no-op. Otherwise automation commits only the new resource lock to Pack
+`dev`, creates the next beta patch tag with the same helper, and dispatches the
+tag release workflow. No beta version commit or persistent beta branch is
+created.
 
 ## Runtime contract
 
@@ -64,8 +87,8 @@ ZotFlow are developed and released against this single resource contract.
 `npm run build` prepares pinned inputs, builds the offline container,
 then runs `verify:pack` and `test:protocol`. All selected resources are read
 back from the final main.js and checked against the lock before provenance
-attestation or Draft Release creation. Release artifacts and the existing
-manifest-version trigger are unchanged.
+attestation or Draft Release creation. Stable tags create Draft Releases; beta
+tags create non-draft prereleases.
 
 Only ZIP downloads/cache reads and final resource verification scan binary
 contents for integrity. Extracted cache preparation checks file existence and

@@ -94,9 +94,19 @@ npm run build
 
 ## Versioning & releases
 
-- Bump `version` in `manifest.json` (SemVer) and update `versions.json` to map plugin version → minimum app version.
-- Create a GitHub release whose tag exactly matches `manifest.json`'s `version`. Do not use a leading `v`.
-- Attach `manifest.json`, `main.js`, and `styles.css` (if present) to the release as individual assets.
+- `dev` is the only long-lived development branch; `master` contains only
+  Pack versions that have already been published as stable releases.
+- Create beta releases from a clean, synchronized `dev` with
+  `npm run beta -- patch|minor|major`. The command creates and pushes an
+  annotated `x.y.z-beta.N` tag without committing beta version metadata.
+- ZotFlow beta compatibility automation may commit a resource-lock update to
+  Pack `dev` and create the beta tag automatically. Do not create a persistent
+  beta branch.
+- Stable release tags are created on `dev`; publish the generated Draft Release
+  before merging the exact tag into `master`.
+- Every GitHub Release tag must exactly match the released `manifest.json`
+  version, without a leading `v`, and include `manifest.json`, `main.js`, and
+  `styles.css` as individual assets.
 - After the initial release, follow the process to add/update your plugin in the community catalog as required.
 
 ## Security, privacy, and compliance
